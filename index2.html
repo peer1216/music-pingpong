@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>音樂乒乓球｜HTML5 感測測試版 v1.0</title>
+<style>
+:root{color-scheme:dark;--bg:#0f1624;--panel:#1b2940;--line:#34445b;--accent:#5eead4}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:#f8fafc;font:14px/1.45 system-ui,-apple-system,"Noto Sans TC",sans-serif}
+main{height:100dvh;min-height:460px;display:flex;flex-direction:column;max-width:1100px;margin:auto;padding:8px;gap:8px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px}h1{font-size:17px;margin:0}small,.muted{color:#acc0d9;font-size:12px}
+.controls{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:9px;display:flex;align-items:center;flex-wrap:wrap;gap:7px}
+button,select,input{font:inherit}button,select{min-height:34px;border:1px solid #66819e;border-radius:9px;background:#293c57;color:#fff;padding:6px 10px}
+button.primary{background:#e5bd54;color:#181d28;border-color:#e5bd54;font-weight:700}button.selected{background:#206b65;border-color:#5eead4}button:active{transform:scale(.98)}select{max-width:100%}
+label{display:inline-flex;gap:6px;align-items:center;flex-wrap:wrap}input[type=range]{width:110px;accent-color:#5eead4}
+#stage{position:relative;min-height:130px;flex:1;background:#050c17;border:1px solid var(--line);border-radius:12px;display:flex;justify-content:center;align-items:center;overflow:hidden}
+#canvas{display:block;touch-action:manipulation;max-width:100%;max-height:100%;background:#0b1525}
+#hint{position:absolute;left:8px;bottom:7px;background:#040a14c9;padding:6px 9px;border-radius:8px;max-width:calc(100% - 16px);font-size:12px;color:#e2e8f0;pointer-events:none}
+.info{display:flex;gap:8px;flex-wrap:wrap}.chip{background:#1b2940;border:1px solid #34445b;border-radius:8px;padding:5px 9px;font-size:12px}
+#status{color:#b8f2e7;flex:1;min-width:200px}.notes{display:flex;gap:4px;flex:1;min-width:220px}
+.notes button{flex:1;min-width:0;padding:6px 0;font-size:12px;border-color:#fff5}
+@media(max-width:500px){main{gap:5px;padding:5px}h1{font-size:15px}.controls{gap:5px;padding:7px}button,select{font-size:12px;min-height:32px;padding:6px 7px}.chip{padding:4px 7px}input[type=range]{width:90px}}
+</style>
+</head>
+<body>
+<main>
+ <header><h1>🏓🎵 音樂乒乓球 · 感測實驗室</h1><small>HTML5 MVP v1.0</small></header>
+ <div class="controls">
+   <button class="primary" id="micBtn">① 只啟動麥克風</button>
+   <button class="primary" id="allBtn">② 啟動鏡頭＋麥克風</button>
+   <button id="testBtn">🔊 測試發聲</button>
+   <button id="cameraBtn">🔄 切換鏡頭</button>
+   <label>模式 <select id="mode">
+     <option value="mic">純聲音：每次碰撞依序演奏</option>
+     <option value="fusion">聲音＋影像：落點決定音高</option>
+     <option value="enter">僅影像：進入區域即發聲（非碰撞判斷）</option>
+   </select></label>
+   <label>音樂 <select id="music"><option value="scale">自由 Do～Ti</option><option value="song">小星星自動旋律</option></select></label>
+ </div>
+ <div class="controls">
+   <button id="pickBtn">🎯 點球取色</button><button id="calBtn">▱ 設定桌面四角</button>
+   <label>撞擊門檻 <input id="threshold" type="range" min="3" max="70" value="15"><b id="thresholdValue">15%</b></label>
+   <label>色彩容差 <input id="tolerance" type="range" min="20" max="140" value="70"><b id="toleranceValue">70</b></label>
+   <button id="resetBtn">清除計數</button>
+ </div>
+ <div id="stage"><canvas id="canvas" width="640" height="480"></canvas><div id="hint">操作順序：先測試發聲 → 只啟動麥克風 → 再開鏡頭追蹤（建議橘球＋素色背景）</div></div>
+ <div class="info">
+   <div class="chip">麥克風峰值：<strong id="level">0%</strong></div>
+   <div class="chip">偵測到的敲擊：<strong id="hits">0</strong></div>
+   <div class="chip">已播放音符：<strong id="tones">0</strong></div>
+   <div class="chip">乒乓球：<strong id="ball">尚未追蹤</strong></div>
+   <div class="chip">最近音符：<strong id="lastNote">—</strong></div>
+ </div>
+ <div class="controls"><div class="notes" id="noteBtns"></div><div id="status" role="status">尚未啟動。手機瀏覽器需使用 HTTPS（或電腦 localhost）授權感測器。</div></div>
+</main>
+<script>
+'use strict';
+const $=id=>document.getElementById(id);
+const canvas=$('canvas'),ctx=canvas.getContext('2d');
+const video=document.createElement('video'); video.autoplay=true; video.muted=true; video.playsInline=true; video.setAttribute('playsinline','');
+const frame=document.createElement('canvas'),fctx=frame.getContext('2d',{willReadFrequently:true});
+const NOTE_NAMES=['Do','Re','Mi','Fa','So','La','Ti'];
+const FREQUENCIES=[261.63,293.66,329.63,349.23,392,440,493.88];
+const COLORS=['#e95356','#f59432','#eac93c','#64bc70','#48c2cb','#4e82ed','#aa63dc'];
+const TWINKLE=[0,0,4,4,5,5,4,3,3,2,2,1,1,0,4,4,3,3,2,2,1,4,4,3,3,2,2,1,0,0,4,4,5,5,4,3,3,2,2,1,1,0];
+let audioCtx=null, analyser=null, inputSource=null, stream=null, running=false, cameraOn=false, front=false;
+let data=null,target=[255,135,34],tolerance=70,peakThreshold=.15,lastPeak=false,lastHitAt=0,micIgnoreUntil=0;
+let hitCount=0,toneCount=0,songStep=0,scaleStep=0,lastNote='—';
+let ball=null,lastBallTime=0,seenBall=false,prevZone=-1, lastVisualTrigger=0, scanAt=0;
+let interaction='',cornerClicks=[],calibrated=false;
+let quad=[];let noteFlash=Array(7).fill(0);
+const sleepStatus=s=>{$('status').textContent=s};
+function defaultQuad(){const w=canvas.width,h=canvas.height;quad=[[.08*w,.15*h],[.92*w,.15*h],[.92*w,.9*h],[.08*w,.9*h]];calibrated=false}
+defaultQuad();
+function setCanvasSize(w,h){canvas.width=w;canvas.height=h;frame.width=320;frame.height=Math.max(1,Math.round(320*h/w));defaultQuad();resizeCanvas()}
+function resizeCanvas(){const stage=$('stage');const ratio=Math.min(stage.clientWidth/canvas.width,stage.clientHeight/canvas.height);canvas.style.width=Math.max(1,Math.floor(canvas.width*ratio))+'px';canvas.style.height=Math.max(1,Math.floor(canvas.height*ratio))+'px'}
+window.addEventListener('resize',resizeCanvas);resizeCanvas();
+function tone(index=0,source='手動'){
+  if(!audioCtx){sleepStatus('請先點「測試發聲」或啟動麥克風，以解鎖音效。');return}
+  const idx=$('music').value==='song'?TWINKLE[songStep++ % TWINKLE.length]:index;
+  const t=audioCtx.currentTime;const osc=audioCtx.createOscillator();const gain=audioCtx.createGain();
+  osc.type='triangle';osc.frequency.setValueAtTime(FREQUENCIES[idx],t);
+  gain.gain.setValueAtTime(.0001,t);gain.gain.exponentialRampToValueAtTime(.22,t+.009);gain.gain.exponentialRampToValueAtTime(.0001,t+.26);
+  osc.connect(gain);gain.connect(audioCtx.destination);osc.start(t);osc.stop(t+.27);
+  toneCount++;lastNote=NOTE_NAMES[idx];noteFlash[idx]=1;
+  $('tones').textContent=toneCount;$('lastNote').textContent=NOTE_NAMES[idx];
+  if(source!=='手動')sleepStatus(`🎵 ${source} → ${NOTE_NAMES[idx]} (${Math.round(FREQUENCIES[idx])} Hz)`);
+  micIgnoreUntil=performance.now()+120; // 減少播放聲音被麥克風回收而形成迴音觸發
+}
+async function unlockAudio(){if(!audioCtx)audioCtx=new (window.AudioContext||window.webkitAudioContext)();if(audioCtx.state==='suspended')await audioCtx.resume()}
+function teardown(){if(stream)stream.getTracks().forEach(t=>t.stop());stream=null;if(inputSource){inputSource.disconnect();inputSource=null}analyser=null;data=null;cameraOn=false;video.srcObject=null;ball=null;seenBall=false}
+async function start(useCamera){
+  try{
+    await unlockAudio();teardown();
+    if(!navigator.mediaDevices?.getUserMedia)throw new Error('瀏覽器無法使用 getUserMedia。請使用 HTTPS 網址（或 localhost）。');
+    stream=await navigator.mediaDevices.getUserMedia({
+      audio:{echoCancellation:false,noiseSuppression:false,autoGainControl:false},
+      video:useCamera?{facingMode:front?'user':'environment',width:{ideal:640},height:{ideal:480}}:false
+    });
+    analyser=audioCtx.createAnalyser();analyser.fftSize=2048;
+    inputSource=audioCtx.createMediaStreamSource(stream);inputSource.connect(analyser);
+    data=new Float32Array(analyser.fftSize);lastPeak=false;lastHitAt=0;
+    if(useCamera){
+      video.onloadedmetadata=()=>{if(video.videoWidth>0){setCanvasSize(video.videoWidth,video.videoHeight);cameraOn=true; sleepStatus('相機已啟動。請先選擇「點球取色」，再設定桌面四角。')}};
+      video.srcObject=stream;
+      await video.play();
+      if(video.videoWidth>0&&!cameraOn){setCanvasSize(video.videoWidth,video.videoHeight);cameraOn=true}
+      sleepStatus('已取得鏡頭與麥克風。請校正球色與桌面區域。');
+    }else{sleepStatus('麥克風已啟動：開始讓球落桌，觀察碰撞數量與是否發出聲音。')}
+    if(!running){running=true;requestAnimationFrame(loop)}
+    $('micBtn').classList.toggle('selected',!useCamera);$('allBtn').classList.toggle('selected',useCamera);
+  }catch(err){teardown();sleepStatus(`⚠️ 無法啟動：${err.name||'Error'} — ${err.message}`)}
+}
+$('micBtn').addEventListener('click',()=>start(false));$('allBtn').addEventListener('click',()=>start(true));
+$('testBtn').addEventListener('click',async()=>{try{await unlockAudio();tone(0);sleepStatus('🔊 已播放 Do；如果沒有聲音，請檢查靜音與媒體音量。')}catch(e){sleepStatus('音效啟動失敗：'+e.message)}});
+$('cameraBtn').addEventListener('click',()=>{front=!front;if(cameraOn)start(true);else sleepStatus('已選擇'+(front?'前':'後')+'鏡頭，下次開啟相機生效')});
+$('threshold').addEventListener('input',e=>{peakThreshold=+e.target.value/100;$('thresholdValue').textContent=e.target.value+'%'});
+$('tolerance').addEventListener('input',e=>{tolerance=+e.target.value;$('toleranceValue').textContent=e.target.value});
+$('mode').addEventListener('change',()=>{prevZone=-1;lastPeak=false;sleepStatus('目前模式：'+$('mode').selectedOptions[0].textContent)});
+$('resetBtn').addEventListener('click',()=>{hitCount=toneCount=songStep=scaleStep=0;lastHitAt=0;lastNote='—';$('hits').textContent='0';$('tones').textContent='0';$('lastNote').textContent='—';sleepStatus('已清除計數')});
+$('pickBtn').addEventListener('click',()=>{if(!cameraOn)return sleepStatus('請先啟動相機');interaction='color';$('pickBtn').classList.add('selected');$('calBtn').classList.remove('selected');sleepStatus('🎯 請點選鏡頭畫面中乒乓球的中央（避免反光點）')});
+$('calBtn').addEventListener('click',()=>{if(!cameraOn)return sleepStatus('請先啟動相機');interaction='corners';cornerClicks=[];$('calBtn').classList.add('selected');$('pickBtn').classList.remove('selected');sleepStatus('▱ 依序點擊桌面「左上、右上、右下、左下」四個角落')});
+for(let i=0;i<7;i++){const b=document.createElement('button');b.textContent=NOTE_NAMES[i];b.style.background=COLORS[i];b.style.color='#08111a';b.addEventListener('click',async()=>{await unlockAudio();tone(i)});$('noteBtns').appendChild(b)}
+canvas.addEventListener('pointerdown',async e=>{
+  if(!cameraOn)return;
+  const rect=canvas.getBoundingClientRect(),x=(e.clientX-rect.left)*canvas.width/rect.width,y=(e.clientY-rect.top)*canvas.height/rect.height;
+  if(interaction==='color'){
+    const px=Math.max(0,Math.min(frame.width-1,Math.round(x*frame.width/canvas.width)));
+    const py=Math.max(0,Math.min(frame.height-1,Math.round(y*frame.height/canvas.height)));
+    const sample=fctx.getImageData(Math.max(0,px-1),Math.max(0,py-1),Math.min(3,frame.width-px+1),Math.min(3,frame.height-py+1)).data;
+    let r=0,g=0,b=0,n=0;for(let i=0;i<sample.length;i+=4){r+=sample[i];g+=sample[i+1];b+=sample[i+2];n++}
+    target=[Math.round(r/n),Math.round(g/n),Math.round(b/n)]; interaction='';$('pickBtn').classList.remove('selected');
+    sleepStatus(`球色 RGB(${target.join(', ')}) 已設定。觀察畫面是否出現綠色追蹤圈。`);
+  }else if(interaction==='corners'){
+    cornerClicks.push([x,y]);const names=['左上','右上','右下','左下'];
+    if(cornerClicks.length===4){quad=cornerClicks.map(p=>p.slice());cornerClicks=[];calibrated=true;interaction='';$('calBtn').classList.remove('selected');sleepStatus('✅ 桌面四角校正完成；彩色區域會貼在您的桌面畫面上。')}
+    else sleepStatus(`已標記 ${names[cornerClicks.length-1]}，請點擊${names[cornerClicks.length]}角。`);
+  }
+});
+// 將桌面正方形的相對座標 (u,v) 以透視投影映射至相機像素座標。
+function getH(){const [p0,p1,p2,p3]=quad;const dx1=p1[0]-p2[0],dx2=p3[0]-p2[0],dx3=p0[0]-p1[0]+p2[0]-p3[0];const dy1=p1[1]-p2[1],dy2=p3[1]-p2[1],dy3=p0[1]-p1[1]+p2[1]-p3[1];const det=dx1*dy2-dx2*dy1;let g=0,h=0;if(Math.abs(det)>1e-7){g=(dx3*dy2-dx2*dy3)/det;h=(dx1*dy3-dx3*dy1)/det}return [p1[0]-p0[0]+g*p1[0],p3[0]-p0[0]+h*p3[0],p0[0],p1[1]-p0[1]+g*p1[1],p3[1]-p0[1]+h*p3[1],p0[1],g,h]}
+function pointOnBoard(u,v,H){const den=H[6]*u+H[7]*v+1;return [(H[0]*u+H[1]*v+H[2])/den,(H[3]*u+H[4]*v+H[5])/den]}
+function imageToBoard(x,y,H){const a=H[0]-x*H[6],b=H[1]-x*H[7],c=H[3]-y*H[6],d=H[4]-y*H[7];const det=a*d-b*c;if(Math.abs(det)<1e-8)return null;const p=x-H[2],q=y-H[5];return [(p*d-b*q)/det,(a*q-p*c)/det]}
+function ballZone(b){const uv=imageToBoard(b.x,b.y,getH());if(!uv||uv[0]<0||uv[0]>=1||uv[1]<0||uv[1]>1)return -1;return Math.min(6,Math.floor(uv[0]*7))}
+// 辨識和球色相近的連續色塊，避免將所有相似顏色取平均而追錯位置。
+function locateBall(){
+  const w=frame.width,h=frame.height,pix=fctx.getImageData(0,0,w,h).data;
+  const step=2,gw=Math.ceil(w/step),gh=Math.ceil(h/step),n=gw*gh;
+  const mask=new Uint8Array(n),used=new Uint8Array(n),queue=new Int32Array(n);
+  const thr2=tolerance*tolerance;
+  for(let yy=0;yy<gh;yy++)for(let xx=0;xx<gw;xx++){
+    const p=(Math.min(yy*step,h-1)*w+Math.min(xx*step,w-1))*4;
+    const dr=pix[p]-target[0],dg=pix[p+1]-target[1],db=pix[p+2]-target[2];
+    if(dr*dr+dg*dg+db*db<thr2)mask[yy*gw+xx]=1;
+  }
+  let best=null,bestScore=-Infinity;
+  for(let i=0;i<n;i++){
+    if(!mask[i]||used[i])continue;
+    let begin=0,end=1;queue[0]=i;used[i]=1;
+    let sz=0,sx=0,sy=0,minX=gw,maxX=0,minY=gh,maxY=0;
+    while(begin<end){const id=queue[begin++],x=id%gw,y=Math.floor(id/gw);sz++;sx+=x;sy+=y;
+      if(x<minX)minX=x;if(x>maxX)maxX=x;if(y<minY)minY=y;if(y>maxY)maxY=y;
+      const ns=[x>0?id-1:-1,x+1<gw?id+1:-1,y>0?id-gw:-1,y+1<gh?id+gw:-1];
+      for(const q of ns)if(q>=0&&mask[q]&&!used[q]){used[q]=1;queue[end++]=q}
+    }
+    if(sz<3||sz>450)continue;
+    const ratio=(maxX-minX+1)/(maxY-minY+1);if(ratio<.4||ratio>2.5)continue;
+    const cx=sx/sz*step*canvas.width/w,cy=sy/sz*step*canvas.height/h;
+    const distance=ball?Math.hypot(cx-ball.x,cy-ball.y):0;
+    const score=Math.min(sz,70)-distance*.10;
+    if(score>bestScore){bestScore=score;best={x:cx,y:cy,size:sz}}
+  }
+  return best;
+}
+function pollMic(t){
+  if(!analyser||!data)return;
+  analyser.getFloatTimeDomainData(data);let peak=0;for(let i=0;i<data.length;i++){const a=Math.abs(data[i]);if(a>peak)peak=a}
+  $('level').textContent=Math.round(Math.min(peak,1)*100)+'%';
+  const high=peak>=peakThreshold;
+  if(high&&!lastPeak&&t-lastHitAt>140&&t>micIgnoreUntil){
+    lastHitAt=t;hitCount++;$('hits').textContent=hitCount;
+    const mode=$('mode').value;
+    if(mode==='mic')tone(scaleStep++%7,'麥克風撞擊');
+    if(mode==='fusion'){
+      if(cameraOn&&ball&&t-lastBallTime<170){const zone=ballZone(ball);if(zone>=0)tone(zone,'聲音＋影像落點');else sleepStatus('聽到碰撞，但球不在校正的桌面範圍內')}
+      else sleepStatus('聽到碰撞，但當下沒有可靠的球位置；本次未發聲')
+    }
+  }
+  lastPeak=high;
+}
+function drawOverlay(t){
+ const H=getH();
+ for(let i=0;i<7;i++){
+   const p0=pointOnBoard(i/7,0,H),p1=pointOnBoard((i+1)/7,0,H),p2=pointOnBoard((i+1)/7,1,H),p3=pointOnBoard(i/7,1,H);
+   ctx.beginPath();ctx.moveTo(...p0);ctx.lineTo(...p1);ctx.lineTo(...p2);ctx.lineTo(...p3);ctx.closePath();
+   ctx.globalAlpha=.20+noteFlash[i]*.46;ctx.fillStyle=COLORS[i];ctx.fill();ctx.globalAlpha=1;
+   ctx.strokeStyle='#ffffffb0';ctx.lineWidth=1.6;ctx.stroke();
+   const mid=pointOnBoard((i+.5)/7,.6,H);ctx.fillStyle='#fff';ctx.font='bold 17px system-ui';ctx.textAlign='center';ctx.strokeStyle='#162033';ctx.lineWidth=3;ctx.strokeText(NOTE_NAMES[i],mid[0],mid[1]);ctx.fillText(NOTE_NAMES[i],mid[0],mid[1]);
+   noteFlash[i]=Math.max(0,noteFlash[i]-.045);
+ }
+ if(ball&&t-lastBallTime<300){ctx.beginPath();ctx.arc(ball.x,ball.y,17,0,Math.PI*2);ctx.lineWidth=3;ctx.strokeStyle='#00ffc3';ctx.stroke();ctx.fillStyle='#00ffc3';ctx.font='13px system-ui';ctx.fillText('球',ball.x,ball.y-21)}
+ for(const [i,p] of cornerClicks.entries()){ctx.beginPath();ctx.arc(p[0],p[1],6,0,Math.PI*2);ctx.fillStyle='#fff';ctx.fill();ctx.fillStyle='#102137';ctx.fillText(String(i+1),p[0],p[1]+3)}
+ ctx.fillStyle='#06101aba';ctx.fillRect(4,5,Math.min(canvas.width-8,330),23);
+ ctx.fillStyle='#dffcf8';ctx.textAlign='left';ctx.font='13px system-ui';ctx.fillText((calibrated?'桌面已校正':'桌面尚未校正（彩色區為預設示意）')+'｜'+(cameraOn?'攝影機 ON':'攝影機 OFF'),11,21);
+}
+function loop(t){
+  if(cameraOn&&video.readyState>=2){
+    ctx.drawImage(video,0,0,canvas.width,canvas.height);
+    fctx.drawImage(video,0,0,frame.width,frame.height);
+    if(t-scanAt>28){scanAt=t;const found=locateBall();if(found){ball=found;lastBallTime=t;seenBall=true;$('ball').textContent='已定位';
+      const zone=ballZone(found),mode=$('mode').value;
+      if(mode==='enter'&&zone>=0&&zone!==prevZone&&t-lastVisualTrigger>150){tone(zone,'影像進入區域');lastVisualTrigger=t}
+      prevZone=zone;
+    }else{seenBall=false;$('ball').textContent='未定位';if(t-lastBallTime>220){ball=null;prevZone=-1}}}
+    drawOverlay(t);
+  }else{ctx.fillStyle='#0b1525';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.fillStyle='#bfcbdf';ctx.textAlign='center';ctx.font='17px system-ui';ctx.fillText('純麥克風測試中（不需要鏡頭）',canvas.width/2,canvas.height/2);}
+  pollMic(t);
+  if(running)requestAnimationFrame(loop);
+}
+// 尚未取得麥克風時，也繪出首屏文字以方便測試。
+ctx.fillStyle='#16243b';ctx.fillRect(0,0,canvas.width,canvas.height);ctx.fillStyle='#f1f5f9';ctx.textAlign='center';ctx.font='20px system-ui';ctx.fillText('按「測試發聲」確認手機音量，再啟動感測器',320,240);
+</script>
+</body>
+</html>
