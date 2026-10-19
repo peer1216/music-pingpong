@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>音樂乒乓球 Web 版</title>
+  <style>
+    body {
+      margin: 0; background: #1a1a1a; color: #fff;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      overflow: hidden; display: flex; flex-direction: column; align-items: center;
+      user-select: none; -webkit-user-select: none;
+    }
+    #top-bar {
+      position: absolute; top: 12px; z-index: 10; display: flex; gap: 10px;
+      background: rgba(0,0,0,0.75); padding: 10px 18px; border-radius: 30px;
+      backdrop-filter: blur(8px); align-items: center; flex-wrap: wrap; justify-content: center;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+    }
+    button, select {
+      font-size: 15px; padding: 8px 14px; border-radius: 20px; border: none;
+      background: #ff9800; color: #000; font-weight: bold; cursor: pointer;
+    }
+    button:active { transform: scale(0.95); }
+    .status-text { font-size: 13px; color: #ddd; margin-left: 5px; }
+    #game-container {
+      position: relative; width: 100vw; height: 100vh;
+      display: flex; justify-content: center; align-items: center;
+    }
+    video { display: none; }
+    canvas { width: 100%; height: 100%; object-fit: cover; }
+  </style>
+</head>
+<body>
+
+  <div id="top-bar">
+    <button id="startBtn">1. 啟動相機與音效</button>
+    <select id="playMode">
+      <option value="scale">自由音階模式 (Do~Ti)</option>
+      <option value="song">《小星星》自動旋律模式</option>
+    </select>
+    <select id="triggerMode">
+      <option value=" trajectory">觸發：視覺軌跡反折 (安靜環境/吵雜皆可)</option>
+      <option value="audio">觸發：麥克風聽音 + 視覺定位 (極低延遲)</option>
+      <option value="enter">觸發：進入音階區即發聲 (最簡單測試)</option>
+    </select>
+    <button id="camBtn">切換前後鏡頭</button>
+    <span class="status-text" id="status">💡 提示：點擊畫面中的乒乓球可重新校正顏色</span>
+  </div>
+
+  <div id="game-container">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="canvas"></canvas>
+  </div>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d', { willReadFrequently: true });
+const startBtn = document.getElementById('startBtn');
+const camBtn = document.getElementById('camBtn');
+const playModeSelect = document.getElementById('playMode');
+const triggerModeSelect = document.getElementById('triggerMode');
+const statusText = document.getElementById('status');
+
+let audioCtx, analyser, dataArray;
+let isRunning = false;
+let facingMode = "environment"; // 預設使用後置鏡頭拍桌面
+
+// 預設追蹤顏色：標準亮橘色乒乓球 (RGB)
+let targetColor = { r: 255, g: 130, b: 30 };
+let colorThreshold = 65; // 顏色容許誤差
+
+// 七個音階與對應色彩 (依原構想示意圖配色)
+const notes = [
+  { name: 'Do', freq: 261.63, color: '#FF3B30', active: 0 },
+  { name: 'Re', freq: 293.66, color: '#FF9500', active: 0 },
+  { name: 'Mi', freq: 329.63, color: '#FFCC00', active: 0 },
+  { name: 'Fa', freq: 349.23, color: '#4CD964', active: 0 },
+  { name: 'So', freq: 392.00, color: '#5AC8FA', active: 0 },
+  { name: 'La', freq: 440.00, color: '#007AFF', active: 0 },
+  { name: 'Ti', freq: 493.88, color: '#AF52DE', active: 0 }
+];
+
+// 《小星星》音階索引 (0=Do, 4=So, 5=La...)
+const twinkleSong = [0,0,4,4,5,5,4, 3,3,2,2,1,1,0, 4,4,3,3,2,2,1, 4,4,3,3,2,2,1, 0,0,4,4,5,5,4, 3,3,2,2,1,1,0];
+let songStep = 0;
+
+// 軌跡追蹤與防重複觸發變數
+let prevY = 0, vy = 0, wasGoingDown = false;
+let lastTriggerTime = 0;
+let lastZoneIndex = -1;
+
+// 啟動相機與 Web Audio
+async function initCameraAndAudio() {
+  try {
+    // 1. 初始化音效合成器 (iOS Safari 必須在按鈕點擊事件內解鎖)
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+
+    // 2. 取得鏡頭與麥克風權限
+    if (video.srcObject) {
+      video.srcObject.getTracks().forEach(track => track.stop());
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: facingMode, width: { ideal: 640 }, height: { ideal: 480 } },
+      audio: true
+    });
+    video.srcObject = stream;
+
+    // 3. 設定麥克風音量分析器 (偵測乒乓球「叩！」的瞬間)
+    const audioSource = audioCtx.createMediaStreamSource(stream);
+    analyser = audioCtx.createAnalyser();
+    analyser.fftSize = 256;
+    audioSource.connect(analyser);
+    dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+    video.onloadedmetadata = () => {
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      if (!isRunning) {
+        isRunning = true;
+        requestAnimationFrame(processFrame);
+      }
+      startBtn.innerText = "✅ 運行中 (可點擊螢幕直接彈奏)";
+      startBtn.style.background = "#4CD964";
+    };
+  } catch (err) {
+    alert("無法開啟相機或麥克風，請確認已在 HTTPS 安全連線下開啟，並允許權限。\n錯誤訊息：" + err.message);
+  }
+}
+
+startBtn.addEventListener('click', initCameraAndAudio);
+camBtn.addEventListener('click', () => {
+  facingMode = (facingMode === "user") ? "environment" : "user";
+  if (isRunning) initCameraAndAudio();
+});
+
+// 合成悅耳的木琴/馬林巴琴音效 (免載入外部 MP3，零延遲)
+function playTone(zoneIndex, impactStrength = 1.0) {
+  if (!audioCtx) return;
+  const now = performance.now();
+  if (now - lastTriggerTime < 160) return; // 0.16秒冷卻時間，防止連音誤觸
+  lastTriggerTime = now;
+
+  let freq = notes[zoneIndex].freq;
+  if (playModeSelect.value === 'song') {
+    freq = notes[twinkleSong[songStep]].freq;
+    songStep = (songStep + 1) % twinkleSong.length;
+  }
+
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.type = 'triangle'; // 三角波帶有溫潤的木琴質感
+  osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+
+  const volume = Math.min(Math.max(impactStrength, 0.4), 1.0);
+  gain.gain.setValueAtTime(volume, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.45);
+
+  osc.connect(gain);
+  gain.connect(audioCtx.destination);
+  osc.start();
+  osc.stop(audioCtx.currentTime + 0.45);
+
+  // 觸發視覺發光動畫
+  notes[zoneIndex].active = 1.0;
+}
+
+// 點擊畫面：1. 點擊音階板可直接試聽  2. 點擊乒乓球可自動吸取顏色校正
+canvas.addEventListener('pointerdown', (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+  const x = Math.floor((e.clientX - rect.left) * scaleX);
+  const y = Math.floor((e.clientY - rect.top) * scaleY);
+
+  // 檢查是否點在下方的虛擬音階圓盤上
+  const zoneY = canvas.height * 0.72;
+  const zoneRadius = (canvas.width / 7) * 0.42;
+  if (Math.abs(y - zoneY) < zoneRadius) {
+    const zoneIdx = Math.floor(x / (canvas.width / 7));
+    if (zoneIdx >= 0 && zoneIdx < 7) {
+      playTone(zoneIdx, 1.0);
+      return;
+    }
+  }
+
+  // 若點擊畫面其他區域，吸取該點像素作為追蹤目標色
+  const pixel = ctx.getImageData(x, y, 1, 1).data;
+  targetColor = { r: pixel[0], g: pixel[1], b: pixel[2] };
+  statusText.innerText = `🎯 已鎖定新球色 RGB(${pixel[0]}, ${pixel[1]}, ${pixel[2]})`;
+});
+
+// 檢查麥克風是否有瞬間撞擊聲
+function checkAudioSpike() {
+  if (!analyser) return false;
+  analyser.getByteTimeDomainData(dataArray);
+  let maxPeak = 0;
+  for (let i = 0; i < dataArray.length; i++) {
+    const amplitude = Math.abs(dataArray[i] - 128);
+    if (amplitude > maxPeak) maxPeak = amplitude;
+  }
+  return maxPeak > 38; // 撞擊音量門檻 (可依環境微調)
+}
+
+// 每一幀影像處理主迴圈
+function processFrame() {
+  if (!isRunning) return;
+
+  // 若使用前鏡頭則做鏡像翻轉，直覺好操作
+  ctx.save();
+  if (facingMode === "user") {
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+  }
+  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  ctx.restore();
+
+  // 1. 掃描畫面尋找乒乓球座標 (每 4 像素跳格採樣，確保 60fps 極速流暢)
+  const frameData = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+  let sumX = 0, sumY = 0, count = 0;
+  const step = 4;
+
+  for (let y = 0; y < canvas.height; y += step) {
+    for (let x = 0; x < canvas.width; x += step) {
+      const i = (y * canvas.width + x) * 4;
+      const dr = frameData[i] - targetColor.r;
+      const dg = frameData[i + 1] - targetColor.g;
+      const db = frameData[i + 2] - targetColor.b;
+      // 歐氏色彩距離判斷
+      if ((dr*dr + dg*dg + db*db) < (colorThreshold * colorThreshold)) {
+        sumX += x;
+        sumY += y;
+        count++;
+      }
+    }
+  }
+
+  const padWidth = canvas.width / 7;
+  const padCenterY = canvas.height * 0.72; // 音階板預設擺在畫面中下方桌面區
+  const padRadius = padWidth * 0.42;
+
+  // 2. 如果畫面中有抓到乒乓球
+  if (count > 8) {
+    const ballX = sumX / count;
+    const ballY = sumY / count;
+
+    // 畫出乒乓球追蹤準星
+    ctx.beginPath();
+    ctx.arc(ballX, ballY, 18, 0, Math.PI * 2);
+    ctx.strokeStyle = '#00FFCC';
+    ctx.lineWidth = 4;
+    ctx.stroke();
+
+    // 計算垂直速度與軌跡反折 (判斷落桌瞬間)
+    vy = ballY - prevY;
+    const currentZone = Math.min(Math.max(Math.floor(ballX / padWidth), 0), 6);
+    const inPadVerticalRange = (ballY > padCenterY - padRadius * 1.8) && (ballY < padCenterY + padRadius * 1.8);
+
+    const mode = triggerModeSelect.value;
+
+    if (mode === 'trajectory') {
+      // 模式 A：球正在往下掉 (vy > 3)，下一瞬間突然往上彈 (vy < -2)，代表撞擊桌面！
+      if (vy > 3.5) wasGoingDown = true;
+      if (wasGoingDown && vy < -1.5 && inPadVerticalRange) {
+        playTone(currentZone, Math.min(Math.abs(vy) / 15, 1.0));
+        wasGoingDown = false;
+      }
+    } else if (mode === 'audio') {
+      // 模式 B：麥克風聽到敲擊聲 + 球剛好在桌面音階區附近
+      if (checkAudioSpike() && inPadVerticalRange) {
+        playTone(currentZone, 1.0);
+      }
+    } else if (mode === 'enter') {
+      // 模式 C：只要球進入不同音階圓盤就發聲 (測試最容易)
+      if (inPadVerticalRange && currentZone !== lastZoneIndex) {
+        playTone(currentZone, 0.8);
+        lastZoneIndex = currentZone;
+      }
+    }
+    prevY = ballY;
+  }
+
+  // 3. 繪製 7 個彩色虛擬音樂圓盤 (完美重現示意圖視覺)
+  for (let i = 0; i < 7; i++) {
+    const centerX = i * padWidth + padWidth / 2;
+    const note = notes[i];
+
+    ctx.save();
+    ctx.beginPath();
+    // 繪製微橢圓透視感的圓盤
+    ctx.ellipse(centerX, padCenterY, padRadius, padRadius * 0.65, 0, 0, Math.PI * 2);
+    ctx.fillStyle = note.color;
+    ctx.globalAlpha = 0.55 + (note.active * 0.45);
+    ctx.fill();
+
+    // 被擊中時的發光外框與放大特效
+    ctx.lineWidth = 3 + (note.active * 8);
+    ctx.strokeStyle = note.active > 0.1 ? '#FFFFFF' : 'rgba(255,255,255,0.4)';
+    ctx.stroke();
+
+    // 繪製 Do Re Mi 字樣
+    ctx.globalAlpha = 0.9;
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = `bold ${Math.floor(padRadius * 0.55)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(note.name, centerX, padCenterY);
+    ctx.restore();
+
+    // 發光動畫衰減
+    if (note.active > 0) note.active = Math.max(0, note.active - 0.08);
+  }
+
+  requestAnimationFrame(processFrame);
+}
+</script>
+</body>
+</html>
